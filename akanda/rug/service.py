@@ -10,6 +10,7 @@ from akanda.rug.openstack.common import rpc
 from akanda.rug.openstack.common.rpc import service as rpc_service
 from akanda.rug.openstack.common import service
 
+
 L3_AGENT_TOPIC = 'l3_agent'
 cfg.CONF.register_opts([
     cfg.IntOpt('periodic_interval',

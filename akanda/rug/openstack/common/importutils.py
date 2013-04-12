@@ -37,6 +37,7 @@ def import_class(import_str):
 
 def import_object(import_str, *args, **kwargs):
     """Import a class and return an instance of it."""
+    print('importing %r'% import_str)
     return import_class(import_str)(*args, **kwargs)
 
 
