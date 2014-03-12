@@ -4,13 +4,13 @@
 import collections
 import logging
 import os
-import Queue
 import threading
 
 from oslo.config import cfg
 
 from akanda.rug import commands
 from akanda.rug import event
+from akanda.rug import uniquequeue
 from akanda.rug import tenant
 from akanda.rug.api import nova
 from akanda.rug.api import quantum
@@ -37,7 +37,7 @@ class Worker(object):
 
     def __init__(self, num_threads, notifier, ignore_directory=None):
         self._ignore_directory = ignore_directory
-        self.work_queue = Queue.Queue()
+        self.work_queue = uniquequeue.UniqueQueue()
         self.lock = threading.Lock()
         self._keep_going = True
         self.tenant_managers = {}
@@ -61,9 +61,6 @@ class Worker(object):
         # Track the routers and tenants we are told to ignore
         self._debug_routers = set()
         self._debug_tenants = set()
-        # Thread locks for the routers so we only put one copy in the
-        # work queue at a time
-        self._router_locks = collections.defaultdict(threading.Lock)
 
     def _thread_target(self):
         """This method runs in each worker thread.
@@ -79,7 +76,7 @@ class Worker(object):
                 # Try to get a state machine from the work queue. If
                 # there's nothing to do, we will block for a while.
                 sm = self.work_queue.get(timeout=10)
-            except Queue.Empty:
+            except uniquequeue.Empty:
                 continue
             if not sm:
                 break
@@ -101,14 +98,6 @@ class Worker(object):
             finally:
                 self.work_queue.task_done()
                 with self.lock:
-                    # Release the lock that prevents us from adding
-                    # the state machine back into the queue. If we
-                    # find more work, we will re-acquire it. If we do
-                    # not find more work, we hold the primary work
-                    # queue lock so the main thread cannot put the
-                    # state machine back into the queue until we
-                    # release that lock.
-                    self._release_router_lock(sm)
                     # The state machine has indicated that it is done
                     # by returning. If there is more work for it to
                     # do, reschedule it by placing it at the end of
@@ -116,7 +105,7 @@ class Worker(object):
                     if sm.has_more_work():
                         LOG.debug('%s has more work, returning to work queue',
                                   sm.router_id)
-                        self._add_router_to_work_queue(sm)
+                        self.work_queue.put(sm)
                     else:
                         LOG.debug('%s has no more work', sm.router_id)
         # Return the context object so tests can look at it
@@ -133,7 +122,7 @@ class Worker(object):
         # Drain the task queue by discarding it
         # FIXME(dhellmann): This could prevent us from deleting
         # routers that need to be deleted.
-        self.work_queue = Queue.Queue()
+        self.work_queue = uniquequeue.UniqueQueue()
         for t in self.threads:
             LOG.debug('sending stop message to %s', t.getName())
             self.work_queue.put((None, None))
@@ -251,22 +240,7 @@ class Worker(object):
                 # at the same time as the thread trying to decide if
                 # the router is done.
                 sm.send_message(message)
-                self._add_router_to_work_queue(sm)
-
-    def _add_router_to_work_queue(self, sm):
-        """Queue up the state machine by router id.
-
-        The work queue lock should be held before calling this method.
-        """
-        l = self._router_locks[sm.router_id]
-        locked = l.acquire(False)
-        if locked:
-            self.work_queue.put(sm)
-        else:
-            LOG.debug('%s is already in the work queue', sm.router_id)
-
-    def _release_router_lock(self, sm):
-        self._router_locks[sm.router_id].release()
+                self.work_queue.put(sm)
 
     def report_status(self):
         LOG.info(
